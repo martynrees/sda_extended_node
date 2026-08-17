@@ -1,0 +1,9 @@
+logs/*
+!logs/.gitkeep
+results/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.mcp.json

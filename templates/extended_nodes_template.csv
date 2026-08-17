@@ -1,0 +1,4 @@
+extended_node_hostname,extended_node_serial,extended_node_pid,site_hierarchy,fabric_edge_identifier,edge_port_channel_interfaces,port_channel_description,image_id,config_id,notes
+# Fields marked (required) must be filled for every row. edge_port_channel_interfaces is ; separated max 8. image_id/config_id/notes are optional - leave blank to skip.,,,,,,,,,
+EN-BuildingA-L2-01,FOC12345ABC,IE-3400H-24T,Global/Site1/BuildingA/Level2,EDGE-SW-BLDGA-01,GigabitEthernet1/0/47;GigabitEthernet1/0/48,Extended node uplink - BuildingA L2 IDF3,,,First batch - IDF3
+EN-BuildingA-L2-02,FOC67890XYZ,IE-3400H-24T,Global/Site1/BuildingA/Level2,EDGE-SW-BLDGA-01,GigabitEthernet1/0/45;GigabitEthernet1/0/46,Extended node uplink - BuildingA L2 IDF4,,,First batch - IDF4
