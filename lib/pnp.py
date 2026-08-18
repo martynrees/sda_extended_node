@@ -1,12 +1,4 @@
-"""PnP (Plug and Play) status lookup, optional pre-stage import, and site claim."""
-
-import time
-
-DEFAULT_CLAIM_POLL_TIMEOUT = 300
-DEFAULT_CLAIM_POLL_INTERVAL = 10
-
-TERMINAL_SUCCESS_STATES = {"Provisioned"}
-TERMINAL_ERROR_STATES = {"Error", "Failed"}
+"""PnP (Plug and Play) pre-staging: import + claim before a device connects."""
 
 
 class PnpError(Exception):
@@ -32,24 +24,7 @@ def get_pnp_device(dnac, serial_number):
     return _as_dict(items[0])
 
 
-def describe_status(pnp_device):
-    if pnp_device is None:
-        return "not seen (device has not dialed home to Catalyst Center yet)"
-    device_info = pnp_device.get("deviceInfo", {})
-    state = device_info.get("state", "unknown")
-    onb_state = (pnp_device.get("systemResetWorkflow") or {}).get("state", "")
-    detail = f"state={state}"
-    if onb_state:
-        detail += f", onboarding={onb_state}"
-    return detail
-
-
-def import_device(dnac, row, dry_run=False):
-    """Pre-stage a device in PnP inventory before it has dialed home.
-
-    Used as a fallback when `claim --import-if-missing` is passed and the
-    serial isn't found via DHCP-triggered auto-registration.
-    """
+def _import_device(dnac, row):
     payload = [
         {
             "deviceInfo": {
@@ -59,46 +34,34 @@ def import_device(dnac, row, dry_run=False):
             }
         }
     ]
-    if dry_run:
-        return {"status": "dry-run", "detail": f"would import PnP device {row.extended_node_serial}"}
-
     dnac.device_onboarding_pnp.import_devices_in_bulk(payload=payload)
-    return {"status": "imported", "detail": f"pre-staged PnP device {row.extended_node_serial}"}
 
 
-def claim_device(dnac, resolver, row, dry_run=False, import_if_missing=False):
-    """Claim a device to its site. Returns a dict with status/detail.
+def stage_device(dnac, resolver, row, dry_run=False):
+    """Pre-stage a device in PnP and claim it to its site, before it connects.
 
-    Raises PnpError if the device cannot be found (and import wasn't
-    requested/didn't help) or the claim call itself fails.
+    Imports the serial/PID if PnP doesn't know about it yet, then claims it
+    to its site. Safe to run ahead of racking the device: once claimed, the
+    device self-provisions the moment it boots, gets DHCP, and dials home —
+    no further manual step is required. Also safe to re-run: a device that
+    already dialed home (imported itself) gets claimed as-is, and one that
+    is already Provisioned is skipped.
     """
     pnp_device = get_pnp_device(dnac, row.extended_node_serial)
 
     if pnp_device is None:
-        if not import_if_missing:
-            raise PnpError(
-                f"serial '{row.extended_node_serial}' not found in PnP inventory yet — "
-                "run 'status' first to confirm the device has dialed home, or pass "
-                "--import-if-missing to pre-stage it"
-            )
-        import_device(dnac, row, dry_run=dry_run)
         if dry_run:
-            return {
-                "status": "dry-run",
-                "detail": f"would import then claim {row.extended_node_serial}",
-            }
+            return {"status": "dry-run", "detail": f"would import and claim {row.extended_node_serial}"}
+        _import_device(dnac, row)
         pnp_device = get_pnp_device(dnac, row.extended_node_serial)
         if pnp_device is None:
-            raise PnpError(
-                f"serial '{row.extended_node_serial}' still not found in PnP inventory after import"
-            )
+            raise PnpError(f"serial '{row.extended_node_serial}' not found in PnP inventory after import")
 
-    device_id = pnp_device["id"]
     device_info = pnp_device.get("deviceInfo", {})
-    current_state = device_info.get("state")
-    if current_state == "Provisioned":
+    if device_info.get("state") == "Provisioned":
         return {"status": "skipped", "detail": f"{row.extended_node_serial} already Provisioned"}
 
+    device_id = pnp_device["id"]
     site_id = resolver.resolve_site_id(row.site_hierarchy)
 
     claim_payload = {
@@ -119,31 +82,7 @@ def claim_device(dnac, resolver, row, dry_run=False, import_if_missing=False):
         }
 
     dnac.device_onboarding_pnp.claim_a_device_to_a_site(payload=claim_payload)
-    final_state = poll_claim_state(dnac, row.extended_node_serial)
-    return {"status": "claimed", "detail": f"final PnP state: {final_state}"}
-
-
-def poll_claim_state(
-    dnac,
-    serial_number,
-    timeout=DEFAULT_CLAIM_POLL_TIMEOUT,
-    interval=DEFAULT_CLAIM_POLL_INTERVAL,
-):
-    """Poll PnP state after a claim until Provisioned, an error state, or timeout."""
-    deadline = time.time() + timeout
-    last_state = "unknown"
-    while time.time() < deadline:
-        pnp_device = get_pnp_device(dnac, serial_number)
-        if pnp_device is not None:
-            last_state = pnp_device.get("deviceInfo", {}).get("state", last_state)
-            if last_state in TERMINAL_SUCCESS_STATES:
-                return last_state
-            if last_state in TERMINAL_ERROR_STATES:
-                raise PnpError(f"{serial_number} entered error state '{last_state}' during claim")
-        time.sleep(interval)
-
-    raise PnpError(
-        f"{serial_number} did not reach 'Provisioned' within {timeout}s "
-        f"(last observed state: '{last_state}') — check 'status' again once the "
-        "device has finished booting and rerun 'verify'"
-    )
+    return {
+        "status": "staged",
+        "detail": f"claimed {row.extended_node_serial} to site {site_id} — will self-provision on dial-home",
+    }

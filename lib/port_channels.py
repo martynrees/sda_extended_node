@@ -60,12 +60,11 @@ def _interfaces_already_in_use(existing_channels, requested_interfaces):
     return in_use
 
 
-def get_fabric_device_roles(dnac, management_ip_address):
-    """Return the SDA fabric role(s) of a device, e.g. ["Extended Node"].
+def get_device_role_response(dnac, management_ip_address):
+    """Return the raw sda.get_device_role_in_sda_fabric() response as a dict.
 
-    Uses sda.get_device_role_in_sda_fabric(), confirmed against a live
-    Catalyst Center deployment. Two other approaches were tried and ruled
-    out first:
+    Confirmed against a live Catalyst Center deployment. Two other approaches
+    were tried and ruled out first:
 
     - devices.get_device_list()'s generic `role` field (ACCESS/DISTRIBUTION/
       CORE/BORDER ROUTER) is a CDP-topology classification unrelated to
@@ -82,8 +81,12 @@ def get_fabric_device_roles(dnac, management_ip_address):
     "EXTENDED_NODE" enum constant used elsewhere in the SDA API surface.
     """
     response = dnac.sda.get_device_role_in_sda_fabric(device_management_ip_address=management_ip_address)
-    response_dict = _as_dict(response)
-    return response_dict.get("roles") or []
+    return _as_dict(response)
+
+
+def get_fabric_device_roles(dnac, management_ip_address):
+    """Return the SDA fabric role(s) of a device, e.g. ["Extended Node"]."""
+    return get_device_role_response(dnac, management_ip_address).get("roles") or []
 
 
 def create_port_channel(dnac, resolver, row, dry_run=False):
