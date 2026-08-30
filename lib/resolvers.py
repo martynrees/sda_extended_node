@@ -21,6 +21,7 @@ class Resolver:
         self._site_cache = {}
         self._fabric_cache = {}
         self._device_cache = {}
+        self._fabric_by_hierarchy_cache = {}
 
     def resolve_site_id(self, site_hierarchy: str) -> str:
         if site_hierarchy in self._site_cache:
@@ -56,6 +57,36 @@ class Resolver:
         fabric_id = items[0]["id"]
         self._fabric_cache[site_id] = fabric_id
         return fabric_id
+
+    def resolve_fabric_id_for_hierarchy(self, site_hierarchy: str) -> str:
+        """Find the fabric site at or above the given site hierarchy.
+
+        A device's site_hierarchy is where it's provisioned (typically a
+        building or floor), which is not necessarily itself a registered
+        fabric site — the fabric is commonly added at a higher site (an
+        area) and child sites inherit fabric membership without being
+        separately registered. Walk up the hierarchy until an ancestor
+        resolves as a fabric site.
+        """
+        if site_hierarchy in self._fabric_by_hierarchy_cache:
+            return self._fabric_by_hierarchy_cache[site_hierarchy]
+
+        parts = site_hierarchy.split("/")
+        tried = []
+        for i in range(len(parts), 0, -1):
+            candidate = "/".join(parts[:i])
+            tried.append(candidate)
+            try:
+                site_id = self.resolve_site_id(candidate)
+                fabric_id = self.resolve_fabric_id(site_id)
+            except ResolverError:
+                continue
+            self._fabric_by_hierarchy_cache[site_hierarchy] = fabric_id
+            return fabric_id
+
+        raise ResolverError(
+            f"no fabric site found at or above '{site_hierarchy}' (checked: {', '.join(tried)})"
+        )
 
     def resolve_device_id(self, identifier: str) -> str:
         if identifier in self._device_cache:

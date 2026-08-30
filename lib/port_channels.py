@@ -95,8 +95,7 @@ def create_port_channel(dnac, resolver, row, dry_run=False):
     Returns a dict describing the outcome: {"status": "created"|"skipped", "detail": str}
     Raises PortChannelError on unrecoverable failure for this row.
     """
-    site_id = resolver.resolve_site_id(row.site_hierarchy)
-    fabric_id = resolver.resolve_fabric_id(site_id)
+    fabric_id = resolver.resolve_fabric_id_for_hierarchy(row.site_hierarchy)
     device_id = resolver.resolve_device_id(row.fabric_edge_identifier)
 
     existing = get_existing_port_channels(dnac, fabric_id, device_id)
