@@ -20,6 +20,7 @@ class Resolver:
         self.dnac = dnac
         self._site_cache = {}
         self._fabric_cache = {}
+        self._fabric_zone_cache = {}
         self._device_cache = {}
         self._fabric_by_hierarchy_cache = {}
 
@@ -58,15 +59,42 @@ class Resolver:
         self._fabric_cache[site_id] = fabric_id
         return fabric_id
 
+    def resolve_fabric_zone_id(self, site_id: str) -> str:
+        """Return the fabric zone id registered at this exact site_id, if any.
+
+        Fabric Zones subdivide a single Fabric Site into scoped
+        sub-domains (used for scale) and are a separate SDA object from
+        Fabric Sites — a device can be a member of a zone without the
+        zone's own site being a registered Fabric Site itself. Confirmed
+        against a live deployment where a device's fabricId (used for
+        add_port_channels/get_fabric_devices) had to be the zone's id, not
+        its parent Fabric Site's id — the two are not interchangeable.
+        """
+        if site_id in self._fabric_zone_cache:
+            return self._fabric_zone_cache[site_id]
+
+        response = self.dnac.sda.get_fabric_zones(site_id=site_id)
+        items = response.get("response") if isinstance(response, dict) else response.response
+        if not items:
+            raise ResolverError(f"site_id '{site_id}' is not a fabric zone")
+
+        fabric_id = items[0]["id"]
+        self._fabric_zone_cache[site_id] = fabric_id
+        return fabric_id
+
     def resolve_fabric_id_for_hierarchy(self, site_hierarchy: str) -> str:
-        """Find the fabric site at or above the given site hierarchy.
+        """Find the fabric site or fabric zone at or above the given site hierarchy.
 
         A device's site_hierarchy is where it's provisioned (typically a
         building or floor), which is not necessarily itself a registered
-        fabric site — the fabric is commonly added at a higher site (an
-        area) and child sites inherit fabric membership without being
-        separately registered. Walk up the hierarchy until an ancestor
-        resolves as a fabric site.
+        fabric site or zone — fabric membership is commonly registered at
+        a higher site (an area, or a zone scoped to that area) and child
+        sites inherit it without being separately registered. Walk up the
+        hierarchy until an ancestor resolves as either. A zone is checked
+        before a site at each level since it's the more specific match —
+        a zone always scopes a subset of its parent Fabric Site, so if a
+        device's site falls under a registered zone, the zone's id (not
+        the parent site's) is what Catalyst Center expects as fabricId.
         """
         if site_hierarchy in self._fabric_by_hierarchy_cache:
             return self._fabric_by_hierarchy_cache[site_hierarchy]
@@ -78,14 +106,22 @@ class Resolver:
             tried.append(candidate)
             try:
                 site_id = self.resolve_site_id(candidate)
-                fabric_id = self.resolve_fabric_id(site_id)
             except ResolverError:
                 continue
+
+            try:
+                fabric_id = self.resolve_fabric_zone_id(site_id)
+            except ResolverError:
+                try:
+                    fabric_id = self.resolve_fabric_id(site_id)
+                except ResolverError:
+                    continue
+
             self._fabric_by_hierarchy_cache[site_hierarchy] = fabric_id
             return fabric_id
 
         raise ResolverError(
-            f"no fabric site found at or above '{site_hierarchy}' (checked: {', '.join(tried)})"
+            f"no fabric site or zone found at or above '{site_hierarchy}' (checked: {', '.join(tried)})"
         )
 
     def resolve_device_id(self, identifier: str) -> str:
