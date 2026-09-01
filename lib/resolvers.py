@@ -94,10 +94,25 @@ class Resolver:
 
         if IP_RE.match(identifier):
             response = self.dnac.devices.get_device_list(management_ip_address=identifier)
+            items = response.get("response") if isinstance(response, dict) else response.response
         else:
             response = self.dnac.devices.get_device_list(hostname=identifier)
+            items = response.get("response") if isinstance(response, dict) else response.response
 
-        items = response.get("response") if isinstance(response, dict) else response.response
+            if not items:
+                # Catalyst Center may register the device under its FQDN
+                # (e.g. "uat-napier-lg05-en1.net.adelaide.edu.au") while the
+                # CSV references it by short hostname — an exact match on
+                # the short name then finds nothing. get_device_list's
+                # hostname filter supports ".*" wildcarding (per the SDK's
+                # own docstring: "hostname=myhost.* to find all hostnames
+                # beginning with myhost"), so retry as a prefix match before
+                # giving up. The len(items) > 1 check below still catches a
+                # genuine ambiguity (e.g. "en1" vs "en10") rather than
+                # silently picking one.
+                response = self.dnac.devices.get_device_list(hostname=f"{identifier}.*")
+                items = response.get("response") if isinstance(response, dict) else response.response
+
         if not items:
             raise ResolverError(f"no network device found matching '{identifier}'")
         if len(items) > 1:
