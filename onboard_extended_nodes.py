@@ -16,7 +16,7 @@ import sys
 import time
 import traceback
 
-from lib import dnac_client, pnp, port_channels
+from lib import dnac_client, port_channels
 from lib.csv_loader import CsvValidationError, load_rows
 from lib.resolvers import Resolver, ResolverError
 
@@ -77,7 +77,7 @@ def _run_phase(phase_name, rows, row_handler):
     for row in rows:
         try:
             outcome = row_handler(row)
-        except (ResolverError, port_channels.PortChannelError, pnp.PnpError) as exc:
+        except (ResolverError, port_channels.PortChannelError) as exc:
             outcome = {"status": "failed", "detail": str(exc)}
         except Exception as exc:  # noqa: BLE001 - keep the batch alive on unexpected errors
             traceback.print_exc()
@@ -103,47 +103,31 @@ def _run_phase(phase_name, rows, row_handler):
 
 
 def cmd_prepare(dnac, resolver, rows, args):
-    """Create the port channel and pre-stage + claim PnP, both in one pass.
+    """Create the fabric port channel for every row.
 
-    Both steps are independent, so one failing does not stop the other from
-    running for the same row. This is the only step that requires a human
-    (racking the hardware) after it; once it's done, devices self-provision
-    on dial-home with no further manual claim needed.
+    The extended node is discovered and onboarded natively over LLDP/CDP
+    once it's racked, cabled into this port channel, and powered on — no PnP
+    pre-staging step. (Pre-claiming the device in PnP before it connects
+    causes Catalyst Center to onboard it as an edge node instead of an
+    extended node, so that step has been removed from this flow.)
     """
     def handler(row):
-        pc_error = None
-        try:
-            pc_result = port_channels.create_port_channel(dnac, resolver, row, dry_run=args.dry_run)
-        except (ResolverError, port_channels.PortChannelError) as exc:
-            pc_error = str(exc)
-            pc_result = None
+        pc_result = port_channels.create_port_channel(dnac, resolver, row, dry_run=args.dry_run)
 
-        pnp_error = None
-        try:
-            pnp_result = pnp.stage_device(dnac, resolver, row, dry_run=args.dry_run)
-        except (ResolverError, pnp.PnpError) as exc:
-            pnp_error = str(exc)
-            pnp_result = None
-
-        pc_detail = f"port-channel FAILED: {pc_error}" if pc_error else f"port-channel: {pc_result['status']} - {pc_result['detail']}"
-        pnp_detail = f"pnp FAILED: {pnp_error}" if pnp_error else f"pnp: {pnp_result['status']} - {pnp_result['detail']}"
-
-        if pc_error or pnp_error:
-            status = "failed"
-        elif args.dry_run:
+        if args.dry_run:
             status = "dry-run"
-        elif pc_result["status"] == "skipped" and pnp_result["status"] == "skipped":
+        elif pc_result["status"] == "skipped":
             status = "skipped"
         else:
             status = "ok"
 
-        return {"status": status, "detail": f"{pc_detail} | {pnp_detail}"}
+        return {"status": status, "detail": f"port-channel: {pc_result['status']} - {pc_result['detail']}"}
 
     _run_phase("prepare", rows, handler)
 
 
 def cmd_monitor(dnac, resolver, rows, args):
-    """Report each device's current dial-home / provisioning state.
+    """Report each device's current discovery / fabric-role state.
 
     Stateless and safe to re-run at any time, in any order — devices that
     haven't connected yet just report "not-seen"; there's no requirement to
@@ -154,20 +138,7 @@ def cmd_monitor(dnac, resolver, rows, args):
         debug_dir = os.path.join(LOGS_DIR, "debug_" + time.strftime("%Y%m%d-%H%M%S"))
 
     def handler(row):
-        debug_payload = {"pnp_device": None, "device_inventory": None, "fabric_role_response": None}
-
-        pnp_device = pnp.get_pnp_device(dnac, row.extended_node_serial)
-        debug_payload["pnp_device"] = pnp_device
-        if pnp_device is None:
-            if debug_dir:
-                _dump_debug(debug_dir, row.extended_node_serial, debug_payload)
-            return {"status": "not-seen", "detail": "device has not dialed home to Catalyst Center yet"}
-
-        state = pnp_device.get("deviceInfo", {}).get("state", "unknown")
-        if state != "Provisioned":
-            if debug_dir:
-                _dump_debug(debug_dir, row.extended_node_serial, debug_payload)
-            return {"status": "in-progress", "detail": f"PnP state = {state}"}
+        debug_payload = {"device_inventory": None, "fabric_role_response": None}
 
         response = dnac.devices.get_device_list(serial_number=row.extended_node_serial)
         items = response.get("response") if isinstance(response, dict) else response.response
@@ -175,10 +146,7 @@ def cmd_monitor(dnac, resolver, rows, args):
         if not items:
             if debug_dir:
                 _dump_debug(debug_dir, row.extended_node_serial, debug_payload)
-            return {
-                "status": "in-progress",
-                "detail": "Provisioned in PnP, not yet visible in device inventory — check again shortly",
-            }
+            return {"status": "not-seen", "detail": "device not yet visible in Catalyst Center inventory"}
 
         device = items[0]
         reachability = device.get("reachabilityStatus", "unknown")
@@ -195,7 +163,7 @@ def cmd_monitor(dnac, resolver, rows, args):
             return {
                 "status": "warning",
                 "detail": f"reachability={reachability}, fabric roles={fabric_roles or 'none'} "
-                "-- provisioned but fabric role is not 'Extended Node', check manually",
+                "-- visible in inventory but fabric role is not 'Extended Node', check manually",
             }
 
         return {"status": "verified", "detail": f"reachability={reachability}, fabric roles={fabric_roles}"}
@@ -231,7 +199,7 @@ def build_arg_parser():
 
     p_prepare = subparsers.add_parser(
         "prepare",
-        help="Create fabric port channels and pre-stage + claim PnP, for every row",
+        help="Create fabric port channels for every row",
         parents=[common],
     )
     p_prepare.add_argument("--csv", required=True, help="Path to extended_nodes.csv")
@@ -239,13 +207,13 @@ def build_arg_parser():
     p_prepare.set_defaults(func=cmd_prepare)
 
     p_monitor = subparsers.add_parser(
-        "monitor", help="Report dial-home / provisioning state for every row", parents=[common]
+        "monitor", help="Report inventory / fabric-role state for every row", parents=[common]
     )
     p_monitor.add_argument("--csv", required=True, help="Path to extended_nodes.csv")
     p_monitor.add_argument(
         "--debug",
         action="store_true",
-        help="Dump raw PnP/inventory/fabric-role API responses per device to logs/debug_<timestamp>/",
+        help="Dump raw inventory/fabric-role API responses per device to logs/debug_<timestamp>/",
     )
     p_monitor.set_defaults(func=cmd_monitor)
 

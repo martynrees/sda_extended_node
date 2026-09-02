@@ -3,9 +3,8 @@
 Automates SD-Access extended node onboarding on Cisco Catalyst Center:
 
 1. Creates the PAgP port channel on the fabric edge switch (`connectedDeviceType=EXTENDED_NODE`).
-2. Pre-stages the device in PnP (import + claim to site) **before it's even connected.**
 
-Because the device is already claimed, it self-provisions the moment it's racked, cabled, powered on, and dials home over DHCP — no manual PnP claim step per device.
+Once the port channel exists, the extended node is discovered and onboarded natively over LLDP/CDP the moment it's racked, cabled into that port channel, and powered on — no PnP claim step. (An earlier version of this script also pre-staged the device in PnP before racking; that step has been removed because pre-claiming an extended node in PnP causes Catalyst Center to onboard it as an edge node instead.)
 
 It does **not** build the fabric, assign IP pools, or configure DHCP — see [Prerequisites](#prerequisites).
 
@@ -27,7 +26,7 @@ Requires Python 3.8+. `requirements.txt` pins `dnacentersdk==2.8.14` (matches Ca
 # 1. Fill in your CSV
 cp templates/extended_nodes_template.csv extended_nodes.csv
 
-# 2. Create port channels + pre-stage/claim PnP for every row (before racking hardware)
+# 2. Create port channels for every row (before racking hardware)
 python onboard_extended_nodes.py prepare --csv extended_nodes.csv --dry-run   # check first
 python onboard_extended_nodes.py prepare --csv extended_nodes.csv
 
@@ -39,7 +38,7 @@ python onboard_extended_nodes.py monitor --csv extended_nodes.csv
 
 `monitor` is stateless: run it as many times as you like while a batch comes online. Devices that haven't connected yet just report `not-seen`; devices that have already reached `verified` don't need re-checking.
 
-Add `--debug` to `monitor` to dump the raw PnP / inventory / fabric-role API responses per device to `logs/debug_<timestamp>/<serial>.json` — useful when validating this flow on a controller/version combination it hasn't been tested against yet, or if a device sits at `warning` and you need to see exactly what Catalyst Center returned.
+Add `--debug` to `monitor` to dump the raw inventory / fabric-role API responses per device to `logs/debug_<timestamp>/<serial>.json` — useful when validating this flow on a controller/version combination it hasn't been tested against yet, or if a device sits at `warning` and you need to see exactly what Catalyst Center returned.
 
 Credentials are always prompted interactively (`--base-url`/`--username` optional as flags, password always via masked `getpass` prompt — never a CLI arg, never logged, never written to disk).
 
@@ -48,18 +47,17 @@ Global flags (`--base-url`, `--username`, `--cc-version`, `--no-verify-ssl`) go 
 ### `prepare` status values
 | Status | Meaning |
 |---|---|
-| `ok` | Port channel created and/or PnP claimed |
-| `skipped` | Port channel and PnP claim both already existed |
+| `ok` | Port channel created |
+| `skipped` | Port channel already existed (interfaces already in a port channel) |
 | `dry-run` | `--dry-run` was passed, nothing written |
-| `failed` | See `detail` — port-channel and PnP errors are reported independently, so one can fail while the other still succeeds |
+| `failed` | See `detail` for the resolver/API error |
 
 ### `monitor` status values
 | Status | Meaning |
 |---|---|
-| `not-seen` | Device hasn't dialed home yet |
-| `in-progress` | Dialed home, still provisioning |
-| `verified` | Provisioned and confirmed with fabric role `Extended Node` |
-| `warning` | Provisioned, but fabric role doesn't show `Extended Node` — check manually |
+| `not-seen` | Device not yet visible in Catalyst Center inventory |
+| `warning` | Visible in inventory, but fabric role doesn't show `Extended Node` — check manually |
+| `verified` | Visible in inventory and confirmed with fabric role `Extended Node` |
 
 Every run writes a timestamped results CSV to `logs/` and prints a summary count at the end. One bad row never aborts the batch.
 
@@ -74,8 +72,8 @@ Every run writes a timestamped results CSV to `logs/` and prints a summary count
 | `fabric_edge_identifier` | yes | Hostname or management IP of the fabric edge switch |
 | `edge_port_channel_interfaces` | yes | `;`-separated, e.g. `GigabitEthernet1/0/47;GigabitEthernet1/0/48` (max 8) |
 | `port_channel_description` | no | Defaults to `Extended node uplink: <hostname>` |
-| `image_id` | no | Golden image to assign on claim; blank to skip |
-| `config_id` | no | Day-0 template to assign on claim; blank to skip |
+| `image_id` | no | Unused — kept for compatibility with older CSVs, safe to leave blank |
+| `config_id` | no | Unused — kept for compatibility with older CSVs, safe to leave blank |
 | `notes` | no | Ignored by the script — your own tracking column |
 
 `connectedDeviceType` (`EXTENDED_NODE`) and `protocol` (`PAGP`) are hardcoded, not CSV columns — PAgP is the only protocol Catalyst Center accepts for this connectedDeviceType.
@@ -100,8 +98,7 @@ extended-node-onboarding/
 │   ├── dnac_client.py          # connect() + credential prompt
 │   ├── csv_loader.py           # CSV -> ExtendedNodeRow, validation
 │   ├── resolvers.py            # site / fabric / device ID lookups, cached per run
-│   ├── port_channels.py        # port channel create + idempotency + task polling
-│   └── pnp.py                  # PnP import + claim (pre-stage)
+│   └── port_channels.py        # port channel create + idempotency + task polling
 ├── templates/extended_nodes_template.csv
 └── logs/                        # per-run results CSVs, gitignored
 ```
