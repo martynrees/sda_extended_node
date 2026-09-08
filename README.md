@@ -48,10 +48,12 @@ Catalyst Center pushes TACACS config to the extended node as part of provisionin
 
 ```bash
 python onboard_extended_nodes.py monitor --csv extended_nodes.csv \
-  --ise --ise-ndg "Device Type#All Device Types#<your-target-NDG>" --ise-dry-run   # check first
+  --ise --ise-base-url <your-ise-hostname> \
+  --ise-ndg "Device Type#All Device Types#<your-target-NDG>" --ise-dry-run   # check first
 
 python onboard_extended_nodes.py monitor --csv extended_nodes.csv \
-  --ise --ise-ndg "Device Type#All Device Types#<your-target-NDG>"
+  --ise --ise-base-url <your-ise-hostname> \
+  --ise-ndg "Device Type#All Device Types#<your-target-NDG>"
 ```
 
 - `--ise` enables the check; requires `--ise-ndg`.
