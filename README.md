@@ -44,24 +44,26 @@ Add `--debug` to `monitor` to dump the raw inventory / fabric-role API responses
 
 Catalyst Center pushes TACACS config to the extended node as part of provisioning, which auto-creates the device as a network-device object in ISE at that point too. If that ISE object isn't in the Network Device Group (NDG) your ISE authorization policy expects, ISE denies the TACACS logon — locking Catalyst Center (and anyone else) out of the device the moment provisioning completes. This is specific to certain ISE policy setups, not a Catalyst Center bug, but `monitor --ise` can detect and fix it in the same poll loop you're already running during onboarding.
 
+**Confirm your actual target NDG in the ISE GUI before running this against production** (Administration > Network Resources > Network Device Groups). The example below (`SDA-Extended-Node`) is illustrative only — do not run it verbatim. Pointing `--ise-ndg` at the wrong group moves compliant devices *out* of the NDG their authorization policy expects, i.e. it causes the exact TACACS lockout this feature exists to fix.
+
 ```bash
 python onboard_extended_nodes.py monitor --csv extended_nodes.csv \
-  --ise --ise-ndg "Device Type#All Device Types#SDA-Extended-Node" --ise-dry-run   # check first
+  --ise --ise-ndg "Device Type#All Device Types#<your-target-NDG>" --ise-dry-run   # check first
 
 python onboard_extended_nodes.py monitor --csv extended_nodes.csv \
-  --ise --ise-ndg "Device Type#All Device Types#SDA-Extended-Node"
+  --ise --ise-ndg "Device Type#All Device Types#<your-target-NDG>"
 ```
 
 - `--ise` enables the check; requires `--ise-ndg`.
 - `--ise-ndg` is a single, fixed target NDG applied to every row in the batch — the full ERS path in `Category#Root#Leaf` form, e.g. `Device Type#All Device Types#SDA-Extended-Node`. Only the membership within that category is replaced; other category memberships (Location, IPSEC, etc.) are left untouched.
-- `--ise-base-url` / `--ise-username` follow the same optional-flag-or-prompt pattern as Catalyst Center; the ISE password is always prompted via masked `getpass`.
+- `--ise-base-url` follows the same optional-flag-or-prompt pattern as Catalyst Center. `--ise-username`/password default to the **same credentials already used for Catalyst Center** — no second prompt. Pass `--ise-username` to use a different ISE account instead, which then prompts for its own password.
 - `--ise-no-verify-ssl` disables TLS verification against ISE (self-signed lab ISE only).
 - `--ise-dry-run` looks up the device and reports the NDG change it would make, without writing anything.
 - The device is matched in ISE **by the live hostname from Catalyst Center's device inventory**, not the CSV's `extended_node_hostname` column — confirmed in testing that Catalyst Center names the device `SN-<serial>` in its own inventory (and therefore in what it auto-creates in ISE), consistently, not just transiently.
 - The check runs as soon as the device is visible in Catalyst Center inventory, not gated on reaching `verified` — TACACS config can land before the fabric-role query settles. The ISE outcome is appended to the row's `detail` column as an informational suffix (e.g. `ISE: updated - '...' -> '...'`); it never changes the primary `status` column, which stays driven by Catalyst Center state only.
 - Idempotent: an NDG change is only written when the device isn't already in the target NDG, so re-running `monitor --ise` repeatedly during onboarding won't churn ISE on every poll.
 
-**Not yet validated against a live ISE.** The ERS request/response contract in `lib/ise_client.py` is implemented from documented ISE ERS API behavior, not confirmed against this customer's ISE the way the rest of this codebase's SDA quirks have been. Run `--ise-dry-run` against one device you already know is in ISE (but in the wrong NDG) first, confirm the reported before/after values look right, before trusting it unattended across a batch.
+ISE lookup, NDG category-matching, and the "already compliant" (`unchanged`) path have been confirmed live. The actual write (`updated`) path — the PUT that corrects a genuinely wrong NDG — has not yet been exercised against a real misassigned device; treat that path as unconfirmed until it has been.
 
 Credentials are always prompted interactively (`--base-url`/`--username` optional as flags, password always via masked `getpass` prompt — never a CLI arg, never logged, never written to disk).
 

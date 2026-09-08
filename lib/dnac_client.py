@@ -29,7 +29,12 @@ def prompt_for_credentials(base_url=None, username=None):
 
 
 def connect(base_url=None, username=None, version=DEFAULT_CC_VERSION, verify=True):
-    """Prompt for credentials and return a connected DNACenterAPI client.
+    """Prompt for credentials and return (dnac, username, password).
+
+    The credentials are returned alongside the client so callers that also
+    need to authenticate elsewhere (e.g. ISE) can reuse them instead of
+    prompting a second time — still only ever held in memory, never written
+    to disk or logged.
 
     `version` must match the controller's exact patch release (Settings >
     About in the Catalyst Center UI) — mismatches are a common source of
@@ -61,4 +66,4 @@ def connect(base_url=None, username=None, version=DEFAULT_CC_VERSION, verify=Tru
         sys.exit(1)
 
     print("Connected.")
-    return dnac
+    return dnac, username, password

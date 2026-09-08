@@ -38,7 +38,7 @@ class IseSession:
         return self.session.put(f"{self.base_url}{path}", **kwargs)
 
 
-def prompt_for_credentials(base_url=None, username=None):
+def prompt_for_credentials(base_url=None, username=None, password=None):
     if not base_url:
         base_url = input(f"ISE base URL (e.g. https://10.1.1.2:{DEFAULT_ERS_PORT}): ").strip()
     if not base_url.startswith("http"):
@@ -50,18 +50,24 @@ def prompt_for_credentials(base_url=None, username=None):
     if not username:
         username = input("ISE username: ").strip()
 
-    password = getpass.getpass("ISE password: ")
+    if password is None:
+        password = getpass.getpass("ISE password: ")
 
     return base_url, username, password
 
 
-def connect(base_url=None, username=None, verify=True):
-    """Prompt for credentials and return a connected IseSession.
+def connect(base_url=None, username=None, password=None, verify=True):
+    """Prompt for whichever of base_url/username/password weren't supplied,
+    and return a connected IseSession.
+
+    Passing username/password lets a caller that already authenticated
+    elsewhere (e.g. Catalyst Center) reuse those credentials for ISE without
+    prompting a second time — still never written to disk or logged.
 
     Fails fast with a clear error on bad credentials/connectivity via a
     cheap authenticated call, same intent as dnac_client.connect().
     """
-    base_url, username, password = prompt_for_credentials(base_url, username)
+    base_url, username, password = prompt_for_credentials(base_url, username, password)
 
     print(f"Connecting to ISE {base_url}...")
     session = requests.Session()

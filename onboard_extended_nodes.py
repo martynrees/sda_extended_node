@@ -263,7 +263,11 @@ def build_arg_parser():
         help="Also check/remediate each device's ISE Network Device Group membership (requires --ise-ndg)",
     )
     p_monitor.add_argument("--ise-base-url", help="ISE base URL, e.g. https://10.1.1.2:9060 (will prompt if omitted)")
-    p_monitor.add_argument("--ise-username", help="ISE ERS username (will prompt if omitted)")
+    p_monitor.add_argument(
+        "--ise-username",
+        help="ISE ERS username. Defaults to the same username/password used for Catalyst Center "
+        "(no extra prompt); pass this to use a different ISE account, which prompts for its own password.",
+    )
     p_monitor.add_argument(
         "--ise-ndg",
         help="Full ERS NDG path to enforce, e.g. 'Device Type#All Device Types#SDA-Extended-Node'. "
@@ -303,7 +307,7 @@ def main():
 
     print(f"Loaded {len(rows)} row(s) from {args.csv}")
 
-    dnac = dnac_client.connect(
+    dnac, catc_username, catc_password = dnac_client.connect(
         base_url=args.base_url,
         username=args.username,
         version=args.cc_version,
@@ -313,9 +317,17 @@ def main():
 
     ise_session = None
     if getattr(args, "ise", False):
+        # Default to the same account used for Catalyst Center so the
+        # operator isn't prompted twice; --ise-username opts into a
+        # different account, which then prompts for its own password.
+        if args.ise_username:
+            ise_username, ise_password = args.ise_username, None
+        else:
+            ise_username, ise_password = catc_username, catc_password
         ise_session = ise_client.connect(
             base_url=args.ise_base_url,
-            username=args.ise_username,
+            username=ise_username,
+            password=ise_password,
             verify=not args.ise_no_verify_ssl,
         )
 
