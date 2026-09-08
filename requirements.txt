@@ -1,1 +1,2 @@
 dnacentersdk==2.8.14
+requests>=2.31.0

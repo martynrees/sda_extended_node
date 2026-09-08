@@ -16,7 +16,7 @@ import sys
 import time
 import traceback
 
-from lib import dnac_client, port_channels
+from lib import dnac_client, ise_client, port_channels
 from lib.csv_loader import CsvValidationError, load_rows
 from lib.resolvers import Resolver, ResolverError
 
@@ -126,12 +126,20 @@ def cmd_prepare(dnac, resolver, rows, args):
     _run_phase("prepare", rows, handler)
 
 
-def cmd_monitor(dnac, resolver, rows, args):
+def cmd_monitor(dnac, resolver, rows, args, ise_session=None):
     """Report each device's current discovery / fabric-role state.
 
     Stateless and safe to re-run at any time, in any order — devices that
     haven't connected yet just report "not-seen"; there's no requirement to
     wait for the whole batch before checking on the ones that are ready.
+
+    If ise_session is set, also checks/remediates the device's ISE Network
+    Device Group membership as soon as the device is visible in Catalyst
+    Center inventory — not gated on pending/warning/verified, since Catalyst
+    Center can push TACACS config (which auto-creates the device in ISE)
+    before the fabric-role query settles. The ISE outcome is appended to
+    `detail` as an informational suffix; it never changes the primary
+    status, which stays driven by CatC state only.
     """
     debug_dir = None
     if args.debug:
@@ -151,16 +159,39 @@ def cmd_monitor(dnac, resolver, rows, args):
         device = items[0]
         reachability = device.get("reachabilityStatus", "unknown")
         management_ip = device.get("managementIpAddress")
+
+        # Live hostname from CatC inventory, not the CSV column — confirmed
+        # in testing that CatC (and therefore what it auto-creates in ISE)
+        # names the device SN-<serial>, not row.extended_node_hostname.
+        ise_note = None
+        if ise_session:
+            try:
+                ise_device = ise_client.get_network_device_by_hostname(ise_session, device.get("hostname"))
+                if ise_device is None:
+                    ise_note = "ISE: network device not yet present"
+                else:
+                    result = ise_client.ensure_ndg_membership(
+                        ise_session, ise_device, args.ise_ndg, dry_run=args.ise_dry_run
+                    )
+                    ise_note = f"ISE: {result['status']} - {result['detail']}"
+            except ise_client.IseError as exc:
+                ise_note = f"ISE: error - {exc}"
+
+        def with_ise(outcome):
+            if ise_note:
+                outcome["detail"] += f" | {ise_note}"
+            return outcome
+
         try:
             role_response = port_channels.get_device_role_response(dnac, management_ip)
         except port_channels.DeviceNotProvisionedError:
             if debug_dir:
                 _dump_debug(debug_dir, row.extended_node_serial, debug_payload)
-            return {
+            return with_ise({
                 "status": "pending",
                 "detail": f"reachability={reachability} -- visible in inventory but not yet "
                 "provisioned/assigned to a site in Catalyst Center; still onboarding, check again shortly",
-            }
+            })
         debug_payload["fabric_role_response"] = role_response
         fabric_roles = role_response.get("roles") or []
 
@@ -169,13 +200,15 @@ def cmd_monitor(dnac, resolver, rows, args):
             print(f"    debug dump: {path}")
 
         if "Extended Node" not in fabric_roles:
-            return {
+            return with_ise({
                 "status": "warning",
                 "detail": f"reachability={reachability}, fabric roles={fabric_roles or 'none'} "
                 "-- visible in inventory but fabric role is not 'Extended Node', check manually",
-            }
+            })
 
-        return {"status": "verified", "detail": f"reachability={reachability}, fabric roles={fabric_roles}"}
+        return with_ise(
+            {"status": "verified", "detail": f"reachability={reachability}, fabric roles={fabric_roles}"}
+        )
 
     _run_phase("monitor", rows, handler)
 
@@ -224,6 +257,28 @@ def build_arg_parser():
         action="store_true",
         help="Dump raw inventory/fabric-role API responses per device to logs/debug_<timestamp>/",
     )
+    p_monitor.add_argument(
+        "--ise",
+        action="store_true",
+        help="Also check/remediate each device's ISE Network Device Group membership (requires --ise-ndg)",
+    )
+    p_monitor.add_argument("--ise-base-url", help="ISE base URL, e.g. https://10.1.1.2:9060 (will prompt if omitted)")
+    p_monitor.add_argument("--ise-username", help="ISE ERS username (will prompt if omitted)")
+    p_monitor.add_argument(
+        "--ise-ndg",
+        help="Full ERS NDG path to enforce, e.g. 'Device Type#All Device Types#SDA-Extended-Node'. "
+        "Required if --ise is set.",
+    )
+    p_monitor.add_argument(
+        "--ise-no-verify-ssl",
+        action="store_true",
+        help="Disable TLS certificate verification against ISE (self-signed lab ISE only)",
+    )
+    p_monitor.add_argument(
+        "--ise-dry-run",
+        action="store_true",
+        help="Look up and report the intended ISE NDG change without writing it",
+    )
     p_monitor.set_defaults(func=cmd_monitor)
 
     return parser
@@ -232,6 +287,10 @@ def build_arg_parser():
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
+
+    if getattr(args, "ise", False) and not args.ise_ndg:
+        print("ERROR: --ise-ndg is required when --ise is set", file=sys.stderr)
+        sys.exit(1)
 
     try:
         rows = load_rows(args.csv)
@@ -252,7 +311,18 @@ def main():
     )
     resolver = Resolver(dnac)
 
-    args.func(dnac, resolver, rows, args)
+    ise_session = None
+    if getattr(args, "ise", False):
+        ise_session = ise_client.connect(
+            base_url=args.ise_base_url,
+            username=args.ise_username,
+            verify=not args.ise_no_verify_ssl,
+        )
+
+    if args.command == "monitor":
+        cmd_monitor(dnac, resolver, rows, args, ise_session=ise_session)
+    else:
+        args.func(dnac, resolver, rows, args)
 
 
 if __name__ == "__main__":

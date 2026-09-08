@@ -40,6 +40,29 @@ python onboard_extended_nodes.py monitor --csv extended_nodes.csv
 
 Add `--debug` to `monitor` to dump the raw inventory / fabric-role API responses per device to `logs/debug_<timestamp>/<serial>.json` — useful when validating this flow on a controller/version combination it hasn't been tested against yet, or if a device sits at `warning` and you need to see exactly what Catalyst Center returned.
 
+### ISE Network Device Group remediation (`monitor --ise`)
+
+Catalyst Center pushes TACACS config to the extended node as part of provisioning, which auto-creates the device as a network-device object in ISE at that point too. If that ISE object isn't in the Network Device Group (NDG) your ISE authorization policy expects, ISE denies the TACACS logon — locking Catalyst Center (and anyone else) out of the device the moment provisioning completes. This is specific to certain ISE policy setups, not a Catalyst Center bug, but `monitor --ise` can detect and fix it in the same poll loop you're already running during onboarding.
+
+```bash
+python onboard_extended_nodes.py monitor --csv extended_nodes.csv \
+  --ise --ise-ndg "Device Type#All Device Types#SDA-Extended-Node" --ise-dry-run   # check first
+
+python onboard_extended_nodes.py monitor --csv extended_nodes.csv \
+  --ise --ise-ndg "Device Type#All Device Types#SDA-Extended-Node"
+```
+
+- `--ise` enables the check; requires `--ise-ndg`.
+- `--ise-ndg` is a single, fixed target NDG applied to every row in the batch — the full ERS path in `Category#Root#Leaf` form, e.g. `Device Type#All Device Types#SDA-Extended-Node`. Only the membership within that category is replaced; other category memberships (Location, IPSEC, etc.) are left untouched.
+- `--ise-base-url` / `--ise-username` follow the same optional-flag-or-prompt pattern as Catalyst Center; the ISE password is always prompted via masked `getpass`.
+- `--ise-no-verify-ssl` disables TLS verification against ISE (self-signed lab ISE only).
+- `--ise-dry-run` looks up the device and reports the NDG change it would make, without writing anything.
+- The device is matched in ISE **by the live hostname from Catalyst Center's device inventory**, not the CSV's `extended_node_hostname` column — confirmed in testing that Catalyst Center names the device `SN-<serial>` in its own inventory (and therefore in what it auto-creates in ISE), consistently, not just transiently.
+- The check runs as soon as the device is visible in Catalyst Center inventory, not gated on reaching `verified` — TACACS config can land before the fabric-role query settles. The ISE outcome is appended to the row's `detail` column as an informational suffix (e.g. `ISE: updated - '...' -> '...'`); it never changes the primary `status` column, which stays driven by Catalyst Center state only.
+- Idempotent: an NDG change is only written when the device isn't already in the target NDG, so re-running `monitor --ise` repeatedly during onboarding won't churn ISE on every poll.
+
+**Not yet validated against a live ISE.** The ERS request/response contract in `lib/ise_client.py` is implemented from documented ISE ERS API behavior, not confirmed against this customer's ISE the way the rest of this codebase's SDA quirks have been. Run `--ise-dry-run` against one device you already know is in ISE (but in the wrong NDG) first, confirm the reported before/after values look right, before trusting it unattended across a batch.
+
 Credentials are always prompted interactively (`--base-url`/`--username` optional as flags, password always via masked `getpass` prompt — never a CLI arg, never logged, never written to disk).
 
 Global flags (`--base-url`, `--username`, `--cc-version`, `--no-verify-ssl`) go **after** the subcommand, e.g. `prepare --csv extended_nodes.csv --no-verify-ssl`.
@@ -97,6 +120,7 @@ extended-node-onboarding/
 ├── onboard_extended_nodes.py   # CLI: prepare, monitor
 ├── lib/
 │   ├── dnac_client.py          # connect() + credential prompt
+│   ├── ise_client.py           # ISE ERS connect() + NDG lookup/remediation
 │   ├── csv_loader.py           # CSV -> ExtendedNodeRow, validation
 │   ├── resolvers.py            # site / fabric / device ID lookups, cached per run
 │   └── port_channels.py        # port channel create + idempotency + task polling
