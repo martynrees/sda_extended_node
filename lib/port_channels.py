@@ -7,6 +7,8 @@ not a customer-configurable option.
 
 import time
 
+from dnacentersdk.exceptions import ApiError
+
 CONNECTED_DEVICE_TYPE = "EXTENDED_NODE"
 PROTOCOL = "PAGP"
 
@@ -15,6 +17,14 @@ DEFAULT_TASK_POLL_INTERVAL = 3
 
 
 class PortChannelError(Exception):
+    pass
+
+
+class DeviceNotProvisionedError(Exception):
+    """The SDA fabric-role API 400s until the device finishes site-assignment/
+    provisioning in Catalyst Center. Expected mid-onboarding, not a real error —
+    callers should treat it as "still in progress", not a failure.
+    """
     pass
 
 
@@ -80,7 +90,12 @@ def get_device_role_response(dnac, management_ip_address):
     Note the value is the human-readable string "Extended Node", not the
     "EXTENDED_NODE" enum constant used elsewhere in the SDA API surface.
     """
-    response = dnac.sda.get_device_role_in_sda_fabric(device_management_ip_address=management_ip_address)
+    try:
+        response = dnac.sda.get_device_role_in_sda_fabric(device_management_ip_address=management_ip_address)
+    except ApiError as exc:
+        if "provision and assign to a site" in str(exc):
+            raise DeviceNotProvisionedError(str(exc)) from exc
+        raise
     return _as_dict(response)
 
 

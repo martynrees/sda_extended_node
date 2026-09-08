@@ -151,7 +151,16 @@ def cmd_monitor(dnac, resolver, rows, args):
         device = items[0]
         reachability = device.get("reachabilityStatus", "unknown")
         management_ip = device.get("managementIpAddress")
-        role_response = port_channels.get_device_role_response(dnac, management_ip)
+        try:
+            role_response = port_channels.get_device_role_response(dnac, management_ip)
+        except port_channels.DeviceNotProvisionedError:
+            if debug_dir:
+                _dump_debug(debug_dir, row.extended_node_serial, debug_payload)
+            return {
+                "status": "pending",
+                "detail": f"reachability={reachability} -- visible in inventory but not yet "
+                "provisioned/assigned to a site in Catalyst Center; still onboarding, check again shortly",
+            }
         debug_payload["fabric_role_response"] = role_response
         fabric_roles = role_response.get("roles") or []
 

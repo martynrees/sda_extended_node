@@ -56,7 +56,8 @@ Global flags (`--base-url`, `--username`, `--cc-version`, `--no-verify-ssl`) go 
 | Status | Meaning |
 |---|---|
 | `not-seen` | Device not yet visible in Catalyst Center inventory |
-| `warning` | Visible in inventory, but fabric role doesn't show `Extended Node` — check manually |
+| `pending` | Visible in inventory, but not yet provisioned/assigned to a site — still onboarding, re-run shortly |
+| `warning` | Provisioned, but fabric role doesn't show `Extended Node` — check manually |
 | `verified` | Visible in inventory and confirmed with fabric role `Extended Node` |
 
 Every run writes a timestamped results CSV to `logs/` and prints a summary count at the end. One bad row never aborts the batch.
