@@ -170,15 +170,14 @@ def cmd_monitor(dnac, resolver, rows, args, ise_session=None, catc_username=None
 
     If args.rename_hostname is set, also pushes the CSV's
     extended_node_hostname to the device over SSH (same as-soon-as-visible
-    gating as ISE) and, once the whole batch has been processed, issues one
-    batched Catalyst Center resync call covering every device that was
-    actually renamed this run.
+    gating as ISE). Catalyst Center's own provisioning/sync process picks up
+    the renamed device on its own; this does not trigger a resync itself
+    (an on-demand forcesync call was tried and dropped — it conflicted with
+    Catalyst Center's own in-flight provisioning/sync of the device).
     """
     debug_dir = None
     if args.debug:
         debug_dir = os.path.join(LOGS_DIR, "debug_" + time.strftime("%Y%m%d-%H%M%S"))
-
-    renamed_device_ids = []
 
     def handler(row):
         debug_payload = {"device_inventory": None, "fabric_role_response": None}
@@ -232,8 +231,6 @@ def cmd_monitor(dnac, resolver, rows, args, ise_session=None, catc_username=None
                         dry_run=args.rename_dry_run,
                     )
                     rename_note = f"rename: {result['status']} - {result['detail']}"
-                    if result["status"] == "updated":
-                        renamed_device_ids.append(device_record["id"])
             except ResolverError as exc:
                 rename_note = f"rename: error - {exc}"
             except hostname_client.HostnameError as exc:
@@ -275,22 +272,6 @@ def cmd_monitor(dnac, resolver, rows, args, ise_session=None, catc_username=None
         )
 
     _run_phase("monitor", rows, handler)
-
-    if args.rename_hostname and not args.rename_dry_run and renamed_device_ids:
-        print(f"\nResyncing {len(renamed_device_ids)} renamed device(s) in Catalyst Center...")
-        try:
-            response = dnac.devices.sync_devices_using_forcesync(payload=renamed_device_ids, force_sync=True)
-            response_dict = dnac_client._as_dict(response)
-            task_id = (response_dict.get("response") or {}).get("taskId") or response_dict.get("taskId")
-            if not task_id:
-                print(f"WARNING: sync_devices_using_forcesync did not return a taskId: {response_dict}")
-            else:
-                task = dnac_client.poll_task(dnac, task_id)
-                print(f"Resync task {task_id} completed: {task.get('progress')}")
-        except dnac_client.TaskError as exc:
-            print(f"WARNING: resync task failed: {exc}")
-        except Exception as exc:  # noqa: BLE001 - report but don't crash on a resync failure
-            print(f"WARNING: resync request failed: {exc}")
 
 
 def build_arg_parser():
@@ -382,13 +363,12 @@ def build_arg_parser():
     p_monitor.add_argument(
         "--rename-hostname",
         action="store_true",
-        help="Push the CSV's extended_node_hostname to the device over SSH, then batch-resync "
-        "renamed devices in Catalyst Center once the whole run completes",
+        help="Push the CSV's extended_node_hostname to the device over SSH (saved to running-config)",
     )
     p_monitor.add_argument(
         "--rename-dry-run",
         action="store_true",
-        help="Report the intended hostname change without pushing config or triggering a resync",
+        help="Report the intended hostname change without pushing config",
     )
     p_monitor.add_argument(
         "--device-type",

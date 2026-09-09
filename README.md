@@ -4,7 +4,7 @@ Automates SD-Access extended node onboarding on Cisco Catalyst Center:
 
 1. Creates the PAgP port channel on the fabric edge switch (`connectedDeviceType=EXTENDED_NODE`).
 2. Optionally remediates the device's ISE Network Device Group membership (`monitor --ise`).
-3. Optionally pushes the CSV's intended hostname to the device over SSH and resyncs Catalyst Center's inventory (`monitor --rename-hostname`).
+3. Optionally pushes the CSV's intended hostname to the device over SSH (`monitor --rename-hostname`).
 
 Once the port channel exists, the extended node is discovered and onboarded natively over LLDP/CDP the moment it's racked, cabled into that port channel, and powered on — no PnP claim step. (An earlier version of this script also pre-staged the device in PnP before racking; that step has been removed because pre-claiming an extended node in PnP causes Catalyst Center to onboard it as an edge node instead.)
 
@@ -67,7 +67,7 @@ python onboard_extended_nodes.py prepare --csv extended_nodes.csv
 # 4. Check progress — re-run any time, on any subset that's ready
 python onboard_extended_nodes.py monitor --csv extended_nodes.csv
 
-# 5. Once a device is visible, push its intended hostname and resync Catalyst Center
+# 5. Once a device is visible, push its intended hostname
 python onboard_extended_nodes.py monitor --csv extended_nodes.csv --rename-hostname
 ```
 
@@ -104,9 +104,9 @@ With `ISE_BASE_URL` and `ISE_NDG` set in `.env` (see [Configuration](#configurat
 
 ISE lookup, NDG category-matching, and the "already compliant" (`unchanged`) path have been confirmed live. The actual write (`updated`) path — the PUT that corrects a genuinely wrong NDG — has not yet been exercised against a real misassigned device; treat that path as unconfirmed until it has been.
 
-### Hostname rename + Catalyst Center resync (`monitor --rename-hostname`)
+### Hostname rename (`monitor --rename-hostname`)
 
-Catalyst Center auto-names a newly onboarded extended node `SN-<serial>` in its inventory. The CSV's `extended_node_hostname` column is otherwise tracking-only — nothing pushes it to the device. `--rename-hostname` closes that gap: it SSHes directly to the device (there's no dnacentersdk intent API for this), sets the running-config hostname to match the CSV, saves it, and then — once the whole CSV batch has been processed — issues a single batched on-demand resync call to Catalyst Center so its inventory reflects the new name immediately rather than waiting for the next poll interval.
+Catalyst Center auto-names a newly onboarded extended node `SN-<serial>` in its inventory. The CSV's `extended_node_hostname` column is otherwise tracking-only — nothing pushes it to the device. `--rename-hostname` closes that gap: it SSHes directly to the device (there's no dnacentersdk intent API for this), sets the running-config hostname to match the CSV, and saves it.
 
 ```bash
 python onboard_extended_nodes.py monitor --csv extended_nodes.csv --rename-hostname --rename-dry-run   # check first
@@ -114,16 +114,14 @@ python onboard_extended_nodes.py monitor --csv extended_nodes.csv --rename-hostn
 ```
 
 - `--rename-hostname` enables the check/push; requires no other flag to be set.
-- `--rename-dry-run` reports the hostname change that would be made (or confirms it's already correct) without pushing config, and skips the resync call entirely.
+- `--rename-dry-run` reports the hostname change that would be made (or confirms it's already correct) without pushing config.
 - `--device-type` (default `cisco_ios`) is the Netmiko driver used for the SSH session — override for extended-node hardware that isn't classic IOS.
 - `--device-port` (default `22`) is the SSH port.
 - SSH login reuses the **same Catalyst Center username/password** already prompted for at the top of the run — no separate device-credential flags. The account is assumed to land directly in privileged EXEC (priv 15); there is no `enable`/secret handling.
 - The check runs as soon as the device is visible in Catalyst Center inventory, same gating as `--ise` — not gated on reaching `verified`.
 - Idempotent: the live hostname (from Catalyst Center's inventory, not the CSV) is compared case-insensitively to the CSV's `extended_node_hostname` before pushing anything; a device that's already correctly named reports `rename: unchanged` and is left alone.
 - The outcome is appended to the row's `detail` column as an informational suffix (e.g. `rename: updated - renamed 'SN-ABC123' -> 'closet-b-en1'`); it never changes the primary `status` column.
-- Devices that were actually renamed this run are batched into **one** `sync_devices_using_forcesync` call after the full CSV has been processed, rather than one resync task per device — both more efficient and the intended use of that API. The resync outcome (task id / completion, or a warning if it failed) is printed after the per-row summary.
-
-**Unconfirmed against a live controller**, same caveat as the ISE write path above: the `sync_devices_using_forcesync` response shape (a single `taskId` vs. a per-device task map) is assumed from the SDK's request/response schema, not yet observed from a real Catalyst Center. Run `--rename-dry-run` first, then a single live device, and check the printed resync response before trusting this unattended across a batch — see [Verification](#verification-checklist) below.
+- This does **not** trigger a Catalyst Center resync. An on-demand `sync_devices_using_forcesync` call after the rename was tried and dropped — it conflicted with Catalyst Center's own in-flight provisioning/sync of the device during onboarding. Catalyst Center picks up the renamed device on its own; if you need it to be reflected immediately rather than on the next poll interval, trigger a resync manually from the Catalyst Center inventory UI for that device.
 
 Credentials are always prompted interactively (`--base-url`/`--username` optional as flags or `.env` values, password always via masked `getpass` prompt — never a CLI arg, never an `.env`/file value, never logged, never written to disk).
 
@@ -197,7 +195,8 @@ extended-node-onboarding/
 Before trusting `--rename-hostname` unattended across a full batch:
 
 1. `pip install -r requirements.txt` to pull in `netmiko`.
-2. Run `monitor --csv extended_nodes.csv --rename-hostname --rename-dry-run` first — confirms hostname detection and the unchanged/would-change logic without touching the device or calling resync.
-3. Re-run without `--rename-dry-run` against a single device; confirm on-box via `show run | include hostname` that the name matches the CSV, and confirm in Catalyst Center's inventory (UI or `dnac.devices.get_device_list`) that the resync picked up the new name without waiting for the normal poll interval.
-4. Check the printed `sync_devices_using_forcesync` response / resync task outcome on that first live run to confirm the assumed `taskId` shape — adjust if the real response differs from a single top-level `taskId`.
+2. Run `monitor --csv extended_nodes.csv --rename-hostname --rename-dry-run` first — confirms hostname detection and the unchanged/would-change logic without touching the device.
+3. Re-run without `--rename-dry-run` against a single device; confirm on-box via `show run | include hostname` that the name matches the CSV.
+
+Confirmed live: hostname detection, `--rename-dry-run`, and the actual SSH push/save have all been tested successfully against a real controller and device.
 
