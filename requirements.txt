@@ -1,2 +1,4 @@
 dnacentersdk==2.8.14
 requests>=2.31.0
+netmiko>=4.3,<5
+python-dotenv>=1.0,<2

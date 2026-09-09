@@ -22,6 +22,7 @@ class Resolver:
         self._fabric_cache = {}
         self._fabric_zone_cache = {}
         self._device_cache = {}
+        self._device_by_serial_cache = {}
         self._fabric_by_hierarchy_cache = {}
 
     def resolve_site_id(self, site_hierarchy: str) -> str:
@@ -123,6 +124,33 @@ class Resolver:
         raise ResolverError(
             f"no fabric site or zone found at or above '{site_hierarchy}' (checked: {', '.join(tried)})"
         )
+
+    def resolve_device_by_serial(self, serial: str) -> dict:
+        """Look up a device's live inventory record by serial number.
+
+        Returns the fields the hostname-rename step needs: `id`,
+        `managementIpAddress`, and the live `hostname` (Catalyst Center's
+        auto-assigned `SN-<serial>`, used for the idempotency check before
+        pushing a rename).
+        """
+        if serial in self._device_by_serial_cache:
+            return self._device_by_serial_cache[serial]
+
+        response = self.dnac.devices.get_device_list(serial_number=[serial])
+        items = response.get("response") if isinstance(response, dict) else response.response
+        if not items:
+            raise ResolverError(f"no network device found matching serial '{serial}'")
+        if len(items) > 1:
+            raise ResolverError(f"serial '{serial}' matched {len(items)} devices, expected exactly 1")
+
+        device = items[0]
+        result = {
+            "id": device["id"],
+            "managementIpAddress": device.get("managementIpAddress"),
+            "hostname": device.get("hostname"),
+        }
+        self._device_by_serial_cache[serial] = result
+        return result
 
     def resolve_device_id(self, identifier: str) -> str:
         if identifier in self._device_cache:

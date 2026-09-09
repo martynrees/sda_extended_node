@@ -7,11 +7,46 @@ convenience; the password is always prompted interactively via getpass.
 
 import getpass
 import sys
+import time
 
 from dnacentersdk import DNACenterAPI
 from dnacentersdk.exceptions import ApiError
 
 DEFAULT_CC_VERSION = "2.3.7.9"
+
+DEFAULT_TASK_TIMEOUT = 120
+DEFAULT_TASK_POLL_INTERVAL = 3
+
+
+class TaskError(Exception):
+    pass
+
+
+def _as_dict(obj):
+    """dnacentersdk responses are MyDict objects; normalise to plain dict access."""
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "to_dict"):
+        return obj.to_dict()
+    return obj
+
+
+def poll_task(dnac, task_id, timeout=DEFAULT_TASK_TIMEOUT, interval=DEFAULT_TASK_POLL_INTERVAL):
+    """Poll a Catalyst Center task until it completes, errors, or times out."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        result = dnac.task.get_task_by_id(task_id=task_id)
+        task = _as_dict(result.response if hasattr(result, "response") else result.get("response"))
+
+        if task.get("isError"):
+            raise TaskError(f"task {task_id} failed: {task.get('failureReason') or task.get('progress')}")
+
+        if task.get("endTime"):
+            return task
+
+        time.sleep(interval)
+
+    raise TaskError(f"task {task_id} did not complete within {timeout}s")
 
 
 def prompt_for_credentials(base_url=None, username=None):

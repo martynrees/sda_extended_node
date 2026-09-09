@@ -5,6 +5,13 @@
     # ... rack, cable, power on the extended node(s) whenever ready ...
     python onboard_extended_nodes.py monitor --csv extended_nodes.csv
 
+Environment-constant settings (base URLs, NDG target, SSH device type/port,
+etc.) can be pre-filled from a `.env` file next to this script instead of
+repeated on every command line — see README.md for the full list of
+supported variables. Copy `.env.example` to `.env` to get started. CLI flags
+always take precedence over `.env` values. Passwords are never read from
+`.env` or any other file — always prompted interactively.
+
 See README.md for full usage and manual prerequisites.
 """
 
@@ -16,11 +23,31 @@ import sys
 import time
 import traceback
 
-from lib import dnac_client, ise_client, port_channels
+from dotenv import load_dotenv
+
+from lib import dnac_client, hostname_client, ise_client, port_channels
 from lib.csv_loader import CsvValidationError, load_rows
 from lib.resolvers import Resolver, ResolverError
 
-LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGS_DIR = os.path.join(SCRIPT_DIR, "logs")
+
+load_dotenv(os.path.join(SCRIPT_DIR, ".env"))
+
+
+def _env_bool(name):
+    return (os.environ.get(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_int(name, default):
+    value = (os.environ.get(name) or "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        print(f"WARNING: ignoring non-numeric {name}={value!r} from environment/.env", file=sys.stderr)
+        return default
 
 
 def _to_jsonable(obj):
@@ -77,7 +104,7 @@ def _run_phase(phase_name, rows, row_handler):
     for row in rows:
         try:
             outcome = row_handler(row)
-        except (ResolverError, port_channels.PortChannelError) as exc:
+        except (ResolverError, port_channels.PortChannelError, dnac_client.TaskError) as exc:
             outcome = {"status": "failed", "detail": str(exc)}
         except Exception as exc:  # noqa: BLE001 - keep the batch alive on unexpected errors
             traceback.print_exc()
@@ -126,7 +153,7 @@ def cmd_prepare(dnac, resolver, rows, args):
     _run_phase("prepare", rows, handler)
 
 
-def cmd_monitor(dnac, resolver, rows, args, ise_session=None):
+def cmd_monitor(dnac, resolver, rows, args, ise_session=None, catc_username=None, catc_password=None):
     """Report each device's current discovery / fabric-role state.
 
     Stateless and safe to re-run at any time, in any order — devices that
@@ -140,10 +167,18 @@ def cmd_monitor(dnac, resolver, rows, args, ise_session=None):
     before the fabric-role query settles. The ISE outcome is appended to
     `detail` as an informational suffix; it never changes the primary
     status, which stays driven by CatC state only.
+
+    If args.rename_hostname is set, also pushes the CSV's
+    extended_node_hostname to the device over SSH (same as-soon-as-visible
+    gating as ISE) and, once the whole batch has been processed, issues one
+    batched Catalyst Center resync call covering every device that was
+    actually renamed this run.
     """
     debug_dir = None
     if args.debug:
         debug_dir = os.path.join(LOGS_DIR, "debug_" + time.strftime("%Y%m%d-%H%M%S"))
+
+    renamed_device_ids = []
 
     def handler(row):
         debug_payload = {"device_inventory": None, "fabric_role_response": None}
@@ -177,9 +212,38 @@ def cmd_monitor(dnac, resolver, rows, args, ise_session=None):
             except ise_client.IseError as exc:
                 ise_note = f"ISE: error - {exc}"
 
-        def with_ise(outcome):
+        rename_note = None
+        if args.rename_hostname:
+            try:
+                device_record = resolver.resolve_device_by_serial(row.extended_node_serial)
+                live_hostname = device_record.get("hostname") or ""
+                if live_hostname.lower() == row.extended_node_hostname.lower():
+                    rename_note = "rename: unchanged"
+                elif not device_record.get("managementIpAddress"):
+                    rename_note = "rename: error - device has no managementIpAddress"
+                else:
+                    result = hostname_client.push_hostname(
+                        device_record["managementIpAddress"],
+                        catc_username,
+                        catc_password,
+                        row.extended_node_hostname,
+                        device_type=args.device_type,
+                        port=args.device_port,
+                        dry_run=args.rename_dry_run,
+                    )
+                    rename_note = f"rename: {result['status']} - {result['detail']}"
+                    if result["status"] == "updated":
+                        renamed_device_ids.append(device_record["id"])
+            except ResolverError as exc:
+                rename_note = f"rename: error - {exc}"
+            except hostname_client.HostnameError as exc:
+                rename_note = f"rename: error - {exc}"
+
+        def with_notes(outcome):
             if ise_note:
                 outcome["detail"] += f" | {ise_note}"
+            if rename_note:
+                outcome["detail"] += f" | {rename_note}"
             return outcome
 
         try:
@@ -187,7 +251,7 @@ def cmd_monitor(dnac, resolver, rows, args, ise_session=None):
         except port_channels.DeviceNotProvisionedError:
             if debug_dir:
                 _dump_debug(debug_dir, row.extended_node_serial, debug_payload)
-            return with_ise({
+            return with_notes({
                 "status": "pending",
                 "detail": f"reachability={reachability} -- visible in inventory but not yet "
                 "provisioned/assigned to a site in Catalyst Center; still onboarding, check again shortly",
@@ -200,17 +264,33 @@ def cmd_monitor(dnac, resolver, rows, args, ise_session=None):
             print(f"    debug dump: {path}")
 
         if "Extended Node" not in fabric_roles:
-            return with_ise({
+            return with_notes({
                 "status": "warning",
                 "detail": f"reachability={reachability}, fabric roles={fabric_roles or 'none'} "
                 "-- visible in inventory but fabric role is not 'Extended Node', check manually",
             })
 
-        return with_ise(
+        return with_notes(
             {"status": "verified", "detail": f"reachability={reachability}, fabric roles={fabric_roles}"}
         )
 
     _run_phase("monitor", rows, handler)
+
+    if args.rename_hostname and not args.rename_dry_run and renamed_device_ids:
+        print(f"\nResyncing {len(renamed_device_ids)} renamed device(s) in Catalyst Center...")
+        try:
+            response = dnac.devices.sync_devices_using_forcesync(payload=renamed_device_ids, force_sync=True)
+            response_dict = dnac_client._as_dict(response)
+            task_id = (response_dict.get("response") or {}).get("taskId") or response_dict.get("taskId")
+            if not task_id:
+                print(f"WARNING: sync_devices_using_forcesync did not return a taskId: {response_dict}")
+            else:
+                task = dnac_client.poll_task(dnac, task_id)
+                print(f"Resync task {task_id} completed: {task.get('progress')}")
+        except dnac_client.TaskError as exc:
+            print(f"WARNING: resync task failed: {exc}")
+        except Exception as exc:  # noqa: BLE001 - report but don't crash on a resync failure
+            print(f"WARNING: resync request failed: {exc}")
 
 
 def build_arg_parser():
@@ -221,18 +301,27 @@ def build_arg_parser():
     # them after the subcommand (verb first, then flags) avoids that
     # clobbering bug entirely and matches the more natural usage pattern.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--base-url", help="Catalyst Center base URL (will prompt if omitted)")
-    common.add_argument("--username", help="Catalyst Center username (will prompt if omitted)")
+    common.add_argument(
+        "--base-url",
+        default=os.environ.get("CATC_BASE_URL"),
+        help="Catalyst Center base URL (env: CATC_BASE_URL; will prompt if omitted)",
+    )
+    common.add_argument(
+        "--username",
+        default=os.environ.get("CATC_USERNAME"),
+        help="Catalyst Center username (env: CATC_USERNAME; will prompt if omitted)",
+    )
     common.add_argument(
         "--cc-version",
-        default=dnac_client.DEFAULT_CC_VERSION,
-        help=f"Catalyst Center API version to target (default: {dnac_client.DEFAULT_CC_VERSION}). "
-        "Must match Settings > About on your controller.",
+        default=os.environ.get("CATC_CC_VERSION", dnac_client.DEFAULT_CC_VERSION),
+        help="Catalyst Center API version to target (env: CATC_CC_VERSION; "
+        f"default: {dnac_client.DEFAULT_CC_VERSION}). Must match Settings > About on your controller.",
     )
     common.add_argument(
         "--no-verify-ssl",
         action="store_true",
-        help="Disable TLS certificate verification (self-signed lab controllers only)",
+        default=_env_bool("CATC_NO_VERIFY_SSL"),
+        help="Disable TLS certificate verification (env: CATC_NO_VERIFY_SSL; self-signed lab controllers only)",
     )
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -262,26 +351,55 @@ def build_arg_parser():
         action="store_true",
         help="Also check/remediate each device's ISE Network Device Group membership (requires --ise-ndg)",
     )
-    p_monitor.add_argument("--ise-base-url", help="ISE base URL, e.g. https://10.1.1.2:9060 (will prompt if omitted)")
+    p_monitor.add_argument(
+        "--ise-base-url",
+        default=os.environ.get("ISE_BASE_URL"),
+        help="ISE base URL, e.g. https://10.1.1.2:9060 (env: ISE_BASE_URL; will prompt if omitted)",
+    )
     p_monitor.add_argument(
         "--ise-username",
-        help="ISE ERS username. Defaults to the same username/password used for Catalyst Center "
-        "(no extra prompt); pass this to use a different ISE account, which prompts for its own password.",
+        default=os.environ.get("ISE_USERNAME"),
+        help="ISE ERS username (env: ISE_USERNAME). Defaults to the same username/password used for Catalyst "
+        "Center (no extra prompt); pass this to use a different ISE account, which prompts for its own password.",
     )
     p_monitor.add_argument(
         "--ise-ndg",
-        help="Full ERS NDG path to enforce, e.g. 'Device Type#All Device Types#SDA-Extended-Node'. "
-        "Required if --ise is set.",
+        default=os.environ.get("ISE_NDG"),
+        help="Full ERS NDG path to enforce, e.g. 'Device Type#All Device Types#SDA-Extended-Node' "
+        "(env: ISE_NDG). Required if --ise is set.",
     )
     p_monitor.add_argument(
         "--ise-no-verify-ssl",
         action="store_true",
-        help="Disable TLS certificate verification against ISE (self-signed lab ISE only)",
+        default=_env_bool("ISE_NO_VERIFY_SSL"),
+        help="Disable TLS certificate verification against ISE (env: ISE_NO_VERIFY_SSL; self-signed lab ISE only)",
     )
     p_monitor.add_argument(
         "--ise-dry-run",
         action="store_true",
         help="Look up and report the intended ISE NDG change without writing it",
+    )
+    p_monitor.add_argument(
+        "--rename-hostname",
+        action="store_true",
+        help="Push the CSV's extended_node_hostname to the device over SSH, then batch-resync "
+        "renamed devices in Catalyst Center once the whole run completes",
+    )
+    p_monitor.add_argument(
+        "--rename-dry-run",
+        action="store_true",
+        help="Report the intended hostname change without pushing config or triggering a resync",
+    )
+    p_monitor.add_argument(
+        "--device-type",
+        default=os.environ.get("DEVICE_TYPE", "cisco_ios"),
+        help="Netmiko device_type for the SSH hostname push (env: DEVICE_TYPE; default: cisco_ios)",
+    )
+    p_monitor.add_argument(
+        "--device-port",
+        type=int,
+        default=_env_int("DEVICE_PORT", 22),
+        help="SSH port for the hostname push (env: DEVICE_PORT; default: 22)",
     )
     p_monitor.set_defaults(func=cmd_monitor)
 
@@ -332,7 +450,15 @@ def main():
         )
 
     if args.command == "monitor":
-        cmd_monitor(dnac, resolver, rows, args, ise_session=ise_session)
+        cmd_monitor(
+            dnac,
+            resolver,
+            rows,
+            args,
+            ise_session=ise_session,
+            catc_username=catc_username,
+            catc_password=catc_password,
+        )
     else:
         args.func(dnac, resolver, rows, args)
 
