@@ -50,7 +50,7 @@ vi .env
 | `DEVICE_TYPE` | `--device-type` | Netmiko driver for `monitor --rename-hostname`'s SSH push (default `cisco_ios`) |
 | `DEVICE_PORT` | `--device-port` | SSH port for the hostname push (default `22`) |
 
-`--csv` and the run-mode flags (`--dry-run`, `--debug`, `--ise`, `--ise-dry-run`, `--rename-hostname`, `--rename-dry-run`) are deliberately **not** `.env`-configurable — they vary per invocation (which batch, which mode) rather than being constant for the environment, and defaulting something like `--rename-hostname` or a dry-run flag to "on" silently from a file would be an easy way to surprise yourself.
+`--csv` and the run-mode flags (`--dry-run`, `--watch`, `--interval`, `--debug`, `--ise`, `--ise-dry-run`, `--rename-hostname`, `--rename-dry-run`) are deliberately **not** `.env`-configurable — they vary per invocation (which batch, which mode) rather than being constant for the environment, and defaulting something like `--rename-hostname` or a dry-run flag to "on" silently from a file would be an easy way to surprise yourself.
 
 ## Usage
 
@@ -67,11 +67,16 @@ python onboard_extended_nodes.py prepare --csv extended_nodes.csv
 # 4. Check progress — re-run any time, on any subset that's ready
 python onboard_extended_nodes.py monitor --csv extended_nodes.csv
 
+# ...or let it poll on its own until every row is verified, instead of re-running by hand
+python onboard_extended_nodes.py monitor --csv extended_nodes.csv --watch
+
 # 5. Once a device is visible, push its intended hostname
 python onboard_extended_nodes.py monitor --csv extended_nodes.csv --rename-hostname
 ```
 
 `monitor` is stateless: run it as many times as you like while a batch comes online. Devices that haven't connected yet just report `not-seen`; devices that have already reached `verified` don't need re-checking.
+
+Add `--watch` to have `monitor` poll on its own in rounds (default every 20s, override with `--interval`) instead of a single pass — useful for starting a run, then racking/cabling/powering on hardware without babysitting the terminal. It keeps polling every row, including any stuck at `failed` or `warning`, forever until all reach `verified`, then exits and prints the suggested next command (`--rename-hostname`). Ctrl+C at any point stops cleanly: it writes a results CSV from the last completed round, prints `stopped — X/N rows verified`, and exits 0 — no traceback. Only the final round's results CSV is written (not one per round) to avoid spamming `logs/`.
 
 Add `--debug` to `monitor` to dump the raw inventory / fabric-role API responses per device to `logs/debug_<timestamp>/<serial>.json` — useful when validating this flow on a controller/version combination it hasn't been tested against yet, or if a device sits at `warning` and you need to see exactly what Catalyst Center returned.
 

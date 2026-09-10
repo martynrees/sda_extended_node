@@ -93,7 +93,7 @@ def _print_summary(phase, results):
     print(f"{'=' * 60}\n")
 
 
-def _run_phase(phase_name, rows, row_handler):
+def _run_phase(phase_name, rows, row_handler, write_csv=True):
     """Run row_handler(row) for every row, catching per-row errors.
 
     row_handler must return {"status": ..., "detail": ...}. Any exception is
@@ -123,8 +123,9 @@ def _run_phase(phase_name, rows, row_handler):
             }
         )
 
-    results_path = _write_results_csv(phase_name, results)
-    print(f"\nResults written to {results_path}")
+    if write_csv:
+        results_path = _write_results_csv(phase_name, results)
+        print(f"\nResults written to {results_path}")
     _print_summary(phase_name, results)
     return results
 
@@ -271,7 +272,37 @@ def cmd_monitor(dnac, resolver, rows, args, ise_session=None, catc_username=None
             {"status": "verified", "detail": f"reachability={reachability}, fabric roles={fabric_roles}"}
         )
 
-    _run_phase("monitor", rows, handler)
+    if not args.watch:
+        _run_phase("monitor", rows, handler)
+        return
+
+    round_num = 0
+    results = []
+    try:
+        while True:
+            round_num += 1
+            print(f"\n=== monitor --watch: round {round_num} @ {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+            results = _run_phase("monitor", rows, handler, write_csv=False)
+            if all(r["status"] == "verified" for r in results):
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        results_path = _write_results_csv("monitor", results)
+        print(f"\nInterrupted. Results written to {results_path}")
+        verified = sum(1 for r in results if r["status"] == "verified")
+        print(f"stopped — {verified}/{len(rows)} rows verified")
+        sys.exit(0)
+
+    results_path = _write_results_csv("monitor", results)
+    print(f"\nResults written to {results_path}")
+    if args.rename_hostname:
+        print(f"\nAll {len(rows)} row(s) verified.")
+    else:
+        print(
+            f"\nAll {len(rows)} row(s) verified. Run "
+            f"`python onboard_extended_nodes.py monitor --csv {args.csv} --rename-hostname` "
+            "to push hostnames now."
+        )
 
 
 def build_arg_parser():
@@ -322,6 +353,15 @@ def build_arg_parser():
         "monitor", help="Report inventory / fabric-role state for every row", parents=[common]
     )
     p_monitor.add_argument("--csv", required=True, help="Path to extended_nodes.csv")
+    p_monitor.add_argument(
+        "--watch", action="store_true",
+        help="Keep polling in rounds (sleeping --interval seconds between them) until every row "
+        "reaches 'verified', instead of a single pass. Ctrl+C stops cleanly.",
+    )
+    p_monitor.add_argument(
+        "--interval", type=int, default=20,
+        help="Seconds to sleep between rounds in --watch mode (default: 20). Ignored without --watch.",
+    )
     p_monitor.add_argument(
         "--debug",
         action="store_true",
