@@ -44,6 +44,14 @@ def push_hostname(host, username, password, new_hostname, device_type="cisco_ios
             return {"status": "dry-run", "detail": f"would rename '{current_hostname}' -> '{new_hostname}'"}
 
         conn.send_config_set([f"hostname {new_hostname}"])
+        # Netmiko cached the pre-rename prompt as base_prompt at connect time and
+        # uses it (unrefreshed) to detect "am I in enable mode?" inside
+        # save_config() -> enable() -> check_enable_mode(). Since the device's
+        # prompt just changed, that stale pattern never matches and save_config()
+        # raises before it ever sends the actual save command -- silently leaving
+        # the rename applied only to the running config, not saved. Re-detecting
+        # the prompt here (generically, not against the old hostname) fixes that.
+        conn.set_base_prompt()
         conn.save_config()
         return {"status": "updated", "detail": f"renamed '{current_hostname}' -> '{new_hostname}'"}
     except (NetmikoTimeoutException, NetmikoAuthenticationException) as exc:
